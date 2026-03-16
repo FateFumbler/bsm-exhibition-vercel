@@ -362,47 +362,48 @@ def serve_static(filename):
 @app.route('/api/contacts', methods=['GET'])
 def get_contacts():
     """Get all contacts"""
+    db = get_db()
     try:
-        db = get_db()
+        # Turso: use db.execute() and fetchall()
+        result = db.execute('SELECT id, full_name, company, designation, phone, email, website, industry, images, created_at FROM contacts ORDER BY created_at DESC')
         
-        # Execute query
-        result = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
-        
-        # For Turso/libsql: use result.rows directly (list-like)
-        # For SQLite: use result.fetchall()
+        # Use fetchall() which works for both Turso and SQLite
         try:
-            # Try Turso way first (result.rows)
-            rows = list(result.rows)
+            rows = result.fetchall()
         except Exception:
-            try:
-                # Try SQLite way
-                rows = result.fetchall()
-            except:
-                rows = []
-        
-        db.close()
+            rows = []
         
         contacts = []
         for row in rows:
-            contact = dict_from_row(row)
-            if contact is None:
-                continue
-            # Parse images JSON
-            if contact.get('images'):
-                try:
-                    contact['images'] = json.loads(contact['images'])
-                except:
-                    contact['images'] = []
+            # Handle both Turso (tuple) and SQLite (Row object)
+            if hasattr(row, '_asdict'):  # SQLite Row
+                contact = row._asdict()
+                contact['images'] = json.loads(contact.get('images', '[]')) if contact.get('images') else []
+            elif isinstance(row, (list, tuple)):  # Turso tuple
+                contact = {
+                    'id': row[0],
+                    'full_name': row[1],
+                    'company': row[2],
+                    'designation': row[3],
+                    'phone': row[4],
+                    'email': row[5],
+                    'website': row[6],
+                    'industry': row[7],
+                    'images': json.loads(row[8]) if row[8] else [],
+                    'created_at': row[9]
+                }
             else:
-                contact['images'] = []
+                # Fallback: try to convert to dict
+                try:
+                    contact = dict(row)
+                except:
+                    contact = {'_raw': str(row)}
             contacts.append(contact)
-        
-        return jsonify(contacts)
+        return jsonify(contacts), 200
     except Exception as e:
-        print(f"Error getting contacts: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
 
 @app.route('/api/contacts', methods=['POST'])
 def create_contact():
@@ -417,12 +418,12 @@ def create_contact():
         if not data.get('fullName') and not data.get('company'):
             return jsonify({'error': 'Name or company is required'}), 400
         
-        db = get_db_connection()
+        db = get_db()
         
         # Handle images - store as JSON (base64 in database for Vercel)
         images_json = json.dumps(data.get('images', []))
         
-        cursor = db.execute('''
+        result = db.execute('''
             INSERT INTO contacts (full_name, company, designation, phone, email, website, industry, images, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
@@ -439,16 +440,20 @@ def create_contact():
         
         # Get the last inserted row id - handle both SQLite and Turso
         try:
-            contact_id = cursor.lastrowid
+            contact_id = result.lastrowid if hasattr(result, 'lastrowid') else None
+            if contact_id is None:
+                # For Turso/libsql, try to get from SELECT
+                try:
+                    result = db.execute("SELECT last_insert_rowid() as id")
+                    rows = list(result.rows) if hasattr(result, 'rows') else result.fetchall()
+                    row = rows[0] if rows else None
+                    contact_id = row[0] if row else None
+                except Exception as e2:
+                    contact_id = None
+                    print(f"Warning: Could not get lastrowid: {e2}")
         except Exception as e:
-            # For Turso/libsql, try to get from SELECT
-            try:
-                result = db.execute("SELECT last_insert_rowid() as id")
-                row = result.fetchone()
-                contact_id = row[0] if row else None
-            except Exception as e2:
-                contact_id = None
-                print(f"Warning: Could not get lastrowid: {e2}")
+            print(f"Warning: Could not get lastrowid: {e}")
+            contact_id = None
         
         db.commit()
         db.close()
@@ -496,7 +501,7 @@ def delete_contact(contact_id):
 def clear_all_contacts():
     """Clear all contacts"""
     try:
-        db = get_db_connection()
+        db = get_db()
         db.execute('DELETE FROM contacts')
         db.commit()
         db.close()
@@ -512,27 +517,37 @@ def clear_all_contacts():
 @app.route('/api/industries', methods=['GET'])
 def get_industries():
     """Get all industries"""
+    db = get_db()
     try:
-        db = get_db()
-        result = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
+        result = db.execute('SELECT id, name, is_default FROM industries ORDER BY is_default DESC, name ASC')
         
-        # Turso uses result.rows, SQLite uses result.fetchall()
+        # Use fetchall() which works for both Turso and SQLite
         try:
-            rows = list(result.rows)
-        except:
-            try:
-                rows = result.fetchall()
-            except:
-                rows = []
-        db.close()
+            rows = result.fetchall()
+        except Exception:
+            rows = []
         
-        industries = [dict_from_row(row) for row in rows if row]
-        return jsonify(industries)
+        industries = []
+        for row in rows:
+            # Handle both Turso (tuple) and SQLite (Row object)
+            if hasattr(row, '_asdict'):  # SQLite Row
+                industries.append(row._asdict())
+            elif isinstance(row, (list, tuple)):  # Turso tuple
+                industries.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'is_default': row[2]
+                })
+            else:
+                try:
+                    industries.append(dict(row))
+                except:
+                    industries.append({'_raw': str(row)})
+        return jsonify(industries), 200
     except Exception as e:
-        print(f"Error getting industries: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
 
 @app.route('/api/industries', methods=['POST'])
 def create_industry():
@@ -544,7 +559,7 @@ def create_industry():
     
     industry_id = data.get('id', data['name'].lower().replace(' ', '-') + '_' + str(int(time.time())))
     
-    db = get_db_connection()
+    db = get_db()
     
     try:
         db.execute(
@@ -571,20 +586,15 @@ def update_industry(industry_id):
         if not data or not data.get('name'):
             return jsonify({'error': 'Industry name is required'}), 400
         
-        db = get_db_connection()
+        db = get_db()
         
-        cursor = db.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
+        result = db.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
         
-        # Check rows affected
+        # Check rows affected - Turso uses rows_affected, SQLite uses rowcount
         try:
-            rows_affected = cursor.rowcount
+            rows_affected = result.rows_affected if hasattr(result, 'rows_affected') else 0
         except:
             rows_affected = 0
-            # Turso might have rows_affected attribute
-            try:
-                rows_affected = cursor.rows_affected if False else 0
-            except:
-                pass
         
         if rows_affected == 0:
             db.close()
