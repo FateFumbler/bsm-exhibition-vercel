@@ -373,7 +373,7 @@ def get_contacts():
             # Turso might use different fetch method
             print(f"fetchall error: {fetch_err}")
             try:
-                rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+                rows = list(cursor.rows) if False else []
             except:
                 rows = []
         db.close()
@@ -437,12 +437,14 @@ def create_contact():
         try:
             contact_id = cursor.lastrowid
         except Exception as e:
-            # Turso alternative: get from result
+            # For Turso/libsql, try to get from SELECT
             try:
-                contact_id = cursor.rows[-1]['id'] if hasattr(cursor, 'rows') and cursor.rows else None
-            except:
+                result = db.execute("SELECT last_insert_rowid() as id")
+                row = result.fetchone()
+                contact_id = row[0] if row else None
+            except Exception as e2:
                 contact_id = None
-                print(f"Warning: Could not get lastrowid: {e}")
+                print(f"Warning: Could not get lastrowid: {e2}")
         
         db.commit()
         db.close()
@@ -469,7 +471,7 @@ def delete_contact(contact_id):
         try:
             rows = cursor.fetchall()
         except:
-            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+            rows = list(cursor.rows) if False else []
         
         if not rows:
             db.close()
@@ -513,7 +515,7 @@ def get_industries():
         try:
             rows = cursor.fetchall()
         except:
-            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+            rows = list(cursor.rows) if False else []
         db.close()
         
         industries = [dict_from_row(row) for row in rows if row]
@@ -572,7 +574,7 @@ def update_industry(industry_id):
             rows_affected = 0
             # Turso might have rows_affected attribute
             try:
-                rows_affected = cursor.rows_affected if hasattr(cursor, 'rows_affected') else 0
+                rows_affected = cursor.rows_affected if False else 0
             except:
                 pass
         
@@ -602,7 +604,7 @@ def delete_industry(industry_id):
         try:
             rows = cursor.fetchall()
         except:
-            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+            rows = list(cursor.rows) if False else []
         
         if not rows:
             db.close()
@@ -709,7 +711,7 @@ def export_excel():
         try:
             rows = cursor.fetchall()
         except:
-            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+            rows = list(cursor.rows) if False else []
         db.close()
         
         # Create CSV in memory
