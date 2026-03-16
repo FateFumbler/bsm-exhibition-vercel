@@ -133,7 +133,7 @@ def init_database():
 
 # Database helpers
 def get_db_connection():
-    """Get database connection"""
+    """Get database connection with proper row handling"""
     db = get_db()
     # For SQLite compatibility with dict access
     if not TURSO_AVAILABLE:
@@ -141,10 +141,32 @@ def get_db_connection():
     return db
 
 def dict_from_row(row):
-    """Convert Row to dict"""
+    """Convert Row to dict - handles both SQLite Row and Turso results"""
+    if row is None:
+        return None
+    # SQLite Row objects have _asdict()
     if hasattr(row, '_asdict'):
         return row._asdict()
-    return dict(row) if row else None
+    # Turso rows might be tuples or have different structure
+    if hasattr(row, 'keys'):
+        try:
+            return dict(row)
+        except:
+            pass
+    # Fallback: try iterating as tuple with column names
+    # This handles libsql results that come as tuples
+    try:
+        # Get column names from description if available
+        if hasattr(row, '_description'):
+            desc = row._description
+            return {desc[i][0]: row[i] for i in range(len(desc))}
+    except:
+        pass
+    # Last resort: try direct dict conversion
+    try:
+        return dict(row)
+    except:
+        return {'_raw': str(row)}
 
 # GPT-4o Vision OCR function (synchronous for Vercel)
 def extract_with_gpt4v(image_base64):
@@ -340,118 +362,167 @@ def serve_static(filename):
 @app.route('/api/contacts', methods=['GET'])
 def get_contacts():
     """Get all contacts"""
-    db = get_db_connection()
-    cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
-    
-    # Turso returns rows differently than SQLite
-    if TURSO_AVAILABLE:
-        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
-    else:
-        rows = cursor.fetchall()
-    db.close()
-    
-    contacts = []
-    for row in rows:
-        contact = dict_from_row(row)
-        # Parse images JSON
-        if contact.get('images'):
+    try:
+        db = get_db_connection()
+        cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+        
+        # Fetch rows - handle both SQLite and Turso
+        try:
+            rows = cursor.fetchall()
+        except Exception as fetch_err:
+            # Turso might use different fetch method
+            print(f"fetchall error: {fetch_err}")
             try:
-                contact['images'] = json.loads(contact['images'])
+                rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
             except:
+                rows = []
+        db.close()
+        
+        contacts = []
+        for row in rows:
+            contact = dict_from_row(row)
+            if contact is None:
+                continue
+            # Parse images JSON
+            if contact.get('images'):
+                try:
+                    contact['images'] = json.loads(contact['images'])
+                except:
+                    contact['images'] = []
+            else:
                 contact['images'] = []
-        else:
-            contact['images'] = []
-        contacts.append(contact)
-    
-    return jsonify(contacts)
+            contacts.append(contact)
+        
+        return jsonify(contacts)
+    except Exception as e:
+        print(f"Error getting contacts: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/contacts', methods=['POST'])
 def create_contact():
     """Create a new contact"""
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    # Validate at least name or company exists
-    if not data.get('fullName') and not data.get('company'):
-        return jsonify({'error': 'Name or company is required'}), 400
-    
-    db = get_db_connection()
-    
-    # Handle images - store as JSON (base64 in database for Vercel)
-    images_json = json.dumps(data.get('images', []))
-    
-    cursor = db.execute('''
-        INSERT INTO contacts (full_name, company, designation, phone, email, website, industry, images, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        data.get('fullName'),
-        data.get('company'),
-        data.get('designation'),
-        data.get('phone'),
-        data.get('email'),
-        data.get('website'),
-        data.get('industry'),
-        images_json,
-        datetime.now().isoformat()
-    ))
-    
-    # Get the last inserted row id - libsql (Turso) supports lastrowid just like SQLite
-    contact_id = cursor.lastrowid
-    
-    db.commit()
-    db.close()
-    
-    return jsonify({'id': contact_id, 'message': 'Contact created successfully'}), 201
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Validate at least name or company exists
+        if not data.get('fullName') and not data.get('company'):
+            return jsonify({'error': 'Name or company is required'}), 400
+        
+        db = get_db_connection()
+        
+        # Handle images - store as JSON (base64 in database for Vercel)
+        images_json = json.dumps(data.get('images', []))
+        
+        cursor = db.execute('''
+            INSERT INTO contacts (full_name, company, designation, phone, email, website, industry, images, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data.get('fullName'),
+            data.get('company'),
+            data.get('designation'),
+            data.get('phone'),
+            data.get('email'),
+            data.get('website'),
+            data.get('industry'),
+            images_json,
+            datetime.now().isoformat()
+        ))
+        
+        # Get the last inserted row id - handle both SQLite and Turso
+        try:
+            contact_id = cursor.lastrowid
+        except Exception as e:
+            # Turso alternative: get from result
+            try:
+                contact_id = cursor.rows[-1]['id'] if hasattr(cursor, 'rows') and cursor.rows else None
+            except:
+                contact_id = None
+                print(f"Warning: Could not get lastrowid: {e}")
+        
+        db.commit()
+        db.close()
+        
+        if contact_id is None:
+            return jsonify({'error': 'Failed to get contact ID after insert'}), 500
+        
+        return jsonify({'id': contact_id, 'message': 'Contact created successfully'}), 201
+    except Exception as e:
+        print(f"Error creating contact: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/contacts/<int:contact_id>', methods=['DELETE'])
 def delete_contact(contact_id):
     """Delete a contact"""
-    db = get_db_connection()
-    
-    # Check if contact exists
-    cursor = db.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
-    if TURSO_AVAILABLE:
-        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
-    else:
-        rows = cursor.fetchall()
-    
-    if not rows:
+    try:
+        db = get_db_connection()
+        
+        # Check if contact exists
+        cursor = db.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
+        
+        try:
+            rows = cursor.fetchall()
+        except:
+            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+        
+        if not rows:
+            db.close()
+            return jsonify({'error': 'Contact not found'}), 404
+        
+        db.execute('DELETE FROM contacts WHERE id = ?', (contact_id,))
+        db.commit()
         db.close()
-        return jsonify({'error': 'Contact not found'}), 404
-    
-    db.execute('DELETE FROM contacts WHERE id = ?', (contact_id,))
-    db.commit()
-    db.close()
-    
-    return jsonify({'message': 'Contact deleted successfully'})
+        
+        return jsonify({'message': 'Contact deleted successfully'})
+    except Exception as e:
+        print(f"Error deleting contact: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/contacts/clear', methods=['DELETE'])
 def clear_all_contacts():
     """Clear all contacts"""
-    db = get_db_connection()
-    db.execute('DELETE FROM contacts')
-    db.commit()
-    db.close()
-    
-    return jsonify({'message': 'All contacts cleared'})
+    try:
+        db = get_db_connection()
+        db.execute('DELETE FROM contacts')
+        db.commit()
+        db.close()
+        
+        return jsonify({'message': 'All contacts cleared'})
+    except Exception as e:
+        print(f"Error clearing contacts: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 # Industries API
 @app.route('/api/industries', methods=['GET'])
 def get_industries():
     """Get all industries"""
-    db = get_db_connection()
-    cursor = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
-    
-    if TURSO_AVAILABLE:
-        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
-    else:
-        rows = cursor.fetchall()
-    db.close()
-    
-    industries = [dict_from_row(row) for row in rows]
-    return jsonify(industries)
+    try:
+        db = get_db_connection()
+        cursor = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
+        
+        try:
+            rows = cursor.fetchall()
+        except:
+            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+        db.close()
+        
+        industries = [dict_from_row(row) for row in rows if row]
+        return jsonify(industries)
+    except Exception as e:
+        print(f"Error getting industries: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/industries', methods=['POST'])
 def create_industry():
@@ -484,58 +555,76 @@ def create_industry():
 @app.route('/api/industries/<industry_id>', methods=['PUT'])
 def update_industry(industry_id):
     """Update an industry"""
-    data = request.get_json()
-    
-    if not data or not data.get('name'):
-        return jsonify({'error': 'Industry name is required'}), 400
-    
-    db = get_db_connection()
-    
-    cursor = db.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
-    
-    # Check rows affected - Turso vs SQLite
-    if TURSO_AVAILABLE:
-        rows_affected = cursor.rows_affected if hasattr(cursor, 'rows_affected') else 0
-    else:
-        rows_affected = cursor.rowcount
-    
-    if rows_affected == 0:
+    try:
+        data = request.get_json()
+        
+        if not data or not data.get('name'):
+            return jsonify({'error': 'Industry name is required'}), 400
+        
+        db = get_db_connection()
+        
+        cursor = db.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
+        
+        # Check rows affected
+        try:
+            rows_affected = cursor.rowcount
+        except:
+            rows_affected = 0
+            # Turso might have rows_affected attribute
+            try:
+                rows_affected = cursor.rows_affected if hasattr(cursor, 'rows_affected') else 0
+            except:
+                pass
+        
+        if rows_affected == 0:
+            db.close()
+            return jsonify({'error': 'Industry not found'}), 404
+        
+        db.commit()
         db.close()
-        return jsonify({'error': 'Industry not found'}), 404
-    
-    db.commit()
-    db.close()
-    
-    return jsonify({'message': 'Industry updated successfully'})
+        
+        return jsonify({'message': 'Industry updated successfully'})
+    except Exception as e:
+        print(f"Error updating industry: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/industries/<industry_id>', methods=['DELETE'])
 def delete_industry(industry_id):
     """Delete an industry"""
-    db = get_db_connection()
-    
-    # Check if it's a default industry
-    cursor = db.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
-    
-    if TURSO_AVAILABLE:
-        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
-    else:
-        rows = cursor.fetchall()
-    
-    if not rows:
+    try:
+        db = get_db_connection()
+        
+        # Check if it's a default industry
+        cursor = db.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
+        
+        try:
+            rows = cursor.fetchall()
+        except:
+            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+        
+        if not rows:
+            db.close()
+            return jsonify({'error': 'Industry not found'}), 404
+        
+        first_row = dict_from_row(rows[0])
+        is_default = first_row.get('is_default', 0) if first_row else 0
+        
+        if is_default:
+            db.close()
+            return jsonify({'error': 'Cannot delete default industry'}), 400
+        
+        db.execute('DELETE FROM industries WHERE id = ?', (industry_id,))
+        db.commit()
         db.close()
-        return jsonify({'error': 'Industry not found'}), 404
-    
-    is_default = dict_from_row(rows[0]).get('is_default', 0) if rows else 0
-    
-    if is_default:
-        db.close()
-        return jsonify({'error': 'Cannot delete default industry'}), 400
-    
-    db.execute('DELETE FROM industries WHERE id = ?', (industry_id,))
-    db.commit()
-    db.close()
-    
-    return jsonify({'message': 'Industry deleted successfully'})
+        
+        return jsonify({'message': 'Industry deleted successfully'})
+    except Exception as e:
+        print(f"Error deleting industry: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 # OCR API - Synchronous for Vercel
 @app.route('/api/ocr/batch', methods=['POST'])
@@ -610,47 +699,55 @@ def upload_file():
 @app.route('/api/export', methods=['GET'])
 def export_excel():
     """Export contacts to Excel format (CSV for simplicity)"""
-    import csv
-    import io
-    
-    db = get_db_connection()
-    cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
-    
-    if TURSO_AVAILABLE:
-        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
-    else:
-        rows = cursor.fetchall()
-    db.close()
-    
-    # Create CSV in memory
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Header
-    writer.writerow(['Name', 'Company', 'Designation', 'Phone', 'Email', 'Website', 'Industry', 'Created At'])
-    
-    # Data
-    for row in rows:
-        row_dict = dict_from_row(row)
-        writer.writerow([
-            row_dict.get('full_name', ''),
-            row_dict.get('company', ''),
-            row_dict.get('designation', ''),
-            row_dict.get('phone', ''),
-            row_dict.get('email', ''),
-            row_dict.get('website', ''),
-            row_dict.get('industry', ''),
-            row_dict.get('created_at', '')
-        ])
-    
-    output.seek(0)
-    
-    from flask import Response
-    return Response(
-        output.getvalue(),
-        mimetype='text/csv',
-        headers={'Content-Disposition': 'attachment; filename=BSM_Contacts.csv'}
-    )
+    try:
+        import csv
+        import io
+        
+        db = get_db_connection()
+        cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+        
+        try:
+            rows = cursor.fetchall()
+        except:
+            rows = list(cursor.rows) if hasattr(cursor, 'rows') else []
+        db.close()
+        
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        writer.writerow(['Name', 'Company', 'Designation', 'Phone', 'Email', 'Website', 'Industry', 'Created At'])
+        
+        # Data
+        for row in rows:
+            row_dict = dict_from_row(row)
+            if row_dict is None:
+                continue
+            writer.writerow([
+                row_dict.get('full_name', ''),
+                row_dict.get('company', ''),
+                row_dict.get('designation', ''),
+                row_dict.get('phone', ''),
+                row_dict.get('email', ''),
+                row_dict.get('website', ''),
+                row_dict.get('industry', ''),
+                row_dict.get('created_at', '')
+            ])
+        
+        output.seek(0)
+        
+        from flask import Response
+        return Response(
+            output.getvalue(),
+            mimetype='text/csv',
+            headers={'Content-Disposition': 'attachment; filename=BSM_Contacts.csv'}
+        )
+    except Exception as e:
+        print(f"Error exporting: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 # Health check
 @app.route('/api/health', methods=['GET'])
