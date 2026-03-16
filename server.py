@@ -363,19 +363,23 @@ def serve_static(filename):
 def get_contacts():
     """Get all contacts"""
     try:
-        db = get_db_connection()
-        cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+        db = get_db()
         
-        # Fetch rows - handle both SQLite and Turso
+        # Execute query
+        result = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+        
+        # For Turso/libsql: use result.rows directly (list-like)
+        # For SQLite: use result.fetchall()
         try:
-            rows = cursor.fetchall()
-        except Exception as fetch_err:
-            # Turso might use different fetch method
-            print(f"fetchall error: {fetch_err}")
+            # Try Turso way first (result.rows)
+            rows = list(result.rows)
+        except Exception:
             try:
-                rows = list(cursor.rows) if False else []
+                # Try SQLite way
+                rows = result.fetchall()
             except:
                 rows = []
+        
         db.close()
         
         contacts = []
@@ -463,15 +467,15 @@ def create_contact():
 def delete_contact(contact_id):
     """Delete a contact"""
     try:
-        db = get_db_connection()
+        db = get_db()
         
         # Check if contact exists
-        cursor = db.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
+        result = db.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
         
         try:
-            rows = cursor.fetchall()
+            rows = result.fetchall()
         except:
-            rows = list(cursor.rows) if False else []
+            rows = list(result.rows) if hasattr(result, 'rows') else []
         
         if not rows:
             db.close()
@@ -509,13 +513,17 @@ def clear_all_contacts():
 def get_industries():
     """Get all industries"""
     try:
-        db = get_db_connection()
-        cursor = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
+        db = get_db()
+        result = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
         
+        # Turso uses result.rows, SQLite uses result.fetchall()
         try:
-            rows = cursor.fetchall()
+            rows = list(result.rows)
         except:
-            rows = list(cursor.rows) if False else []
+            try:
+                rows = result.fetchall()
+            except:
+                rows = []
         db.close()
         
         industries = [dict_from_row(row) for row in rows if row]
@@ -596,15 +604,15 @@ def update_industry(industry_id):
 def delete_industry(industry_id):
     """Delete an industry"""
     try:
-        db = get_db_connection()
+        db = get_db()
         
         # Check if it's a default industry
-        cursor = db.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
+        result = db.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
         
         try:
-            rows = cursor.fetchall()
+            rows = result.fetchall()
         except:
-            rows = list(cursor.rows) if False else []
+            rows = list(result.rows) if hasattr(result, 'rows') else []
         
         if not rows:
             db.close()
@@ -705,13 +713,13 @@ def export_excel():
         import csv
         import io
         
-        db = get_db_connection()
-        cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+        db = get_db()
+        result = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
         
         try:
-            rows = cursor.fetchall()
+            rows = result.fetchall()
         except:
-            rows = list(cursor.rows) if False else []
+            rows = list(result.rows) if hasattr(result, 'rows') else []
         db.close()
         
         # Create CSV in memory
