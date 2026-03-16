@@ -15,7 +15,10 @@ from flask_cors import CORS
 import openai
 
 # Configuration
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) or '/home/Fate/.openclaw/workspace/bsm-exhibition-vercel'
+try:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+except:
+    BASE_DIR = '/var/task'
 # Use /tmp for Vercel (ephemeral filesystem)
 if os.environ.get('VERCEL'):
     DATABASE_PATH = '/tmp/database.db'
@@ -278,12 +281,18 @@ def process_ocr_sync(base64_data):
 @app.route('/')
 def index():
     """Serve the main frontend"""
-    return send_from_directory(os.path.join(BASE_DIR, 'static'), 'index.html')
+    static_dir = os.path.join(BASE_DIR, 'static')
+    if not os.path.exists(static_dir):
+        static_dir = BASE_DIR  # Fallback
+    return send_from_directory(static_dir, 'index.html')
 
 @app.route('/<path:filename>')
 def serve_static(filename):
     """Serve static files"""
-    return send_from_directory(os.path.join(BASE_DIR, 'static'), filename)
+    static_dir = os.path.join(BASE_DIR, 'static')
+    if not os.path.exists(static_dir):
+        static_dir = BASE_DIR  # Fallback
+    return send_from_directory(static_dir, filename)
 
 # Contacts API
 @app.route('/api/contacts', methods=['GET'])
