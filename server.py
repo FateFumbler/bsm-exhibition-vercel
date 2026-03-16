@@ -16,7 +16,11 @@ import openai
 
 # Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) or '/home/Fate/.openclaw/workspace/bsm-exhibition-vercel'
-DATABASE_PATH = os.path.join(BASE_DIR, 'database.db')
+# Use /tmp for Vercel (ephemeral filesystem)
+if os.environ.get('VERCEL'):
+    DATABASE_PATH = '/tmp/database.db'
+else:
+    DATABASE_PATH = os.path.join(BASE_DIR, 'database.db')
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
