@@ -587,11 +587,6 @@ def health_check():
 # Initialize database on startup
 init_database()
 
-# Vercel handler (required for @vercel/python)
-def handler(request):
-    """Vercel serverless handler"""
-    return app.full_dispatch
-
 # Run locally
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)
