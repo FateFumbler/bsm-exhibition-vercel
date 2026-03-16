@@ -1,0 +1,6 @@
+flask
+openai
+pandas
+openpyxl
+Pillow
+requests
