@@ -30,14 +30,24 @@ else:
 TURSO_DB_URL = os.environ.get('TURSO_DATABASE_URL')
 TURSO_AUTH_TOKEN = os.environ.get('TURSO_AUTH_TOKEN')
 
+# Track if Turso is available (updated after connection test)
+TURSO_AVAILABLE = False
+
 def get_db():
     """Get database connection - Turso for production, SQLite for local dev"""
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
-        # Use Turso (production on Vercel)
-        return libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
-    else:
-        # Use local SQLite (development)
-        return sqlite3.connect(DATABASE_PATH)
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN and TURSO_AVAILABLE:
+        try:
+            # Use Turso (production on Vercel)
+            conn = libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+            # Test the connection
+            conn.execute('SELECT 1')
+            return conn
+        except Exception as e:
+            print(f"Turso connection failed: {e}")
+            print("Falling back to SQLite")
+    
+    # Use local SQLite (development or fallback)
+    return sqlite3.connect(DATABASE_PATH)
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
@@ -56,6 +66,23 @@ CORS(app)
 # Database initialization
 def init_database():
     """Initialize database with contacts and industries tables"""
+    global TURSO_AVAILABLE
+    
+    # Test Turso connection first
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        try:
+            test_conn = libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+            test_conn.execute('SELECT 1')
+            test_conn.close()
+            TURSO_AVAILABLE = True
+            print("Turso connection verified successfully")
+        except Exception as e:
+            print(f"Turso connection test failed: {e}")
+            print("Will use SQLite as fallback")
+            TURSO_AVAILABLE = False
+    else:
+        TURSO_AVAILABLE = False
+    
     db = get_db()
     
     # Turso uses standard SQL, SQLite also supports these syntaxes
@@ -101,15 +128,15 @@ def init_database():
     
     db.commit()
     db.close()
-    db_type = "Turso" if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else "SQLite"
-    print(f"Database initialized ({db_type}) at: {TURSO_DB_URL if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else DATABASE_PATH}")
+    db_type = "Turso" if TURSO_AVAILABLE else "SQLite"
+    print(f"Database initialized ({db_type}) at: {TURSO_DB_URL if TURSO_AVAILABLE else DATABASE_PATH}")
 
 # Database helpers
 def get_db_connection():
     """Get database connection"""
     db = get_db()
     # For SQLite compatibility with dict access
-    if not (TURSO_DB_URL and TURSO_AUTH_TOKEN):
+    if not TURSO_AVAILABLE:
         db.row_factory = sqlite3.Row
     return db
 
@@ -317,7 +344,7 @@ def get_contacts():
     cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
     
     # Turso returns rows differently than SQLite
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
     else:
         rows = cursor.fetchall()
@@ -371,7 +398,7 @@ def create_contact():
     ))
     
     # Get the last inserted row id
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         # Turso: use a separate query to get lastrowid
         result = db.execute('SELECT last_insert_rowid() as id')
         contact_id = result.rows[0][0] if result.rows else None
@@ -390,7 +417,7 @@ def delete_contact(contact_id):
     
     # Check if contact exists
     cursor = db.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
     else:
         rows = cursor.fetchall()
@@ -422,7 +449,7 @@ def get_industries():
     db = get_db_connection()
     cursor = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
     
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
     else:
         rows = cursor.fetchall()
@@ -472,7 +499,7 @@ def update_industry(industry_id):
     cursor = db.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
     
     # Check rows affected - Turso vs SQLite
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         rows_affected = cursor.rows_affected if hasattr(cursor, 'rows_affected') else 0
     else:
         rows_affected = cursor.rowcount
@@ -494,7 +521,7 @@ def delete_industry(industry_id):
     # Check if it's a default industry
     cursor = db.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
     
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
     else:
         rows = cursor.fetchall()
@@ -594,7 +621,7 @@ def export_excel():
     db = get_db_connection()
     cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
     
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+    if TURSO_AVAILABLE:
         rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
     else:
         rows = cursor.fetchall()
@@ -634,11 +661,11 @@ def export_excel():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    db_type = "Turso" if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else "SQLite"
+    db_type = "Turso" if TURSO_AVAILABLE else "SQLite"
     return jsonify({
         'status': 'ok',
         'database_type': db_type,
-        'database_path': TURSO_DB_URL if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else DATABASE_PATH,
+        'database_path': TURSO_DB_URL if TURSO_AVAILABLE else DATABASE_PATH,
         'vercel_mode': True
     })
 
