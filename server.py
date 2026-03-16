@@ -1,10 +1,11 @@
 """
 BSM Exhibition Backend - Flask Server (Vercel-ready version)
-Handles API requests, file uploads, OCR processing, and SQLite database
+Handles API requests, file uploads, OCR processing, and Turso/SQLite database
 Optimized for Vercel's serverless environment
 """
 import os
 import sqlite3
+import libsql
 import uuid
 import json
 import base64
@@ -25,6 +26,19 @@ if os.environ.get('VERCEL'):
 else:
     DATABASE_PATH = os.path.join(BASE_DIR, 'database.db')
 
+# Turso configuration
+TURSO_DB_URL = os.environ.get('TURSO_DATABASE_URL')
+TURSO_AUTH_TOKEN = os.environ.get('TURSO_AUTH_TOKEN')
+
+def get_db():
+    """Get database connection - Turso for production, SQLite for local dev"""
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        # Use Turso (production on Vercel)
+        return libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+    else:
+        # Use local SQLite (development)
+        return sqlite3.connect(DATABASE_PATH)
+
 # OpenAI Configuration
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
@@ -41,12 +55,11 @@ CORS(app)
 
 # Database initialization
 def init_database():
-    """Initialize SQLite database with contacts and industries tables"""
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
+    """Initialize database with contacts and industries tables"""
+    db = get_db()
     
-    # Contacts table - images stored as base64 JSON
-    cursor.execute('''
+    # Turso uses standard SQL, SQLite also supports these syntaxes
+    db.execute('''
         CREATE TABLE IF NOT EXISTS contacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             full_name TEXT,
@@ -56,13 +69,12 @@ def init_database():
             email TEXT,
             website TEXT,
             industry TEXT,
-            images TEXT,  -- JSON array of base64 images
+            images TEXT,
             created_at TEXT
         )
     ''')
     
-    # Industries table
-    cursor.execute('''
+    db.execute('''
         CREATE TABLE IF NOT EXISTS industries (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -84,24 +96,27 @@ def init_database():
         ('other', 'Other (Type Your Own)', 1)
     ]
     
-    cursor.executemany(
-        'INSERT OR IGNORE INTO industries (id, name, is_default) VALUES (?, ?, ?)',
-        default_industries
-    )
+    for industry in default_industries:
+        db.execute('INSERT OR IGNORE INTO industries (id, name, is_default) VALUES (?, ?, ?)', industry)
     
-    conn.commit()
-    conn.close()
-    print(f"Database initialized at: {DATABASE_PATH}")
+    db.commit()
+    db.close()
+    db_type = "Turso" if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else "SQLite"
+    print(f"Database initialized ({db_type}) at: {TURSO_DB_URL if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else DATABASE_PATH}")
 
 # Database helpers
 def get_db_connection():
     """Get database connection"""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    db = get_db()
+    # For SQLite compatibility with dict access
+    if not (TURSO_DB_URL and TURSO_AUTH_TOKEN):
+        db.row_factory = sqlite3.Row
+    return db
 
 def dict_from_row(row):
-    """Convert sqlite3.Row to dict"""
+    """Convert Row to dict"""
+    if hasattr(row, '_asdict'):
+        return row._asdict()
     return dict(row) if row else None
 
 # GPT-4o Vision OCR function (synchronous for Vercel)
@@ -298,15 +313,19 @@ def serve_static(filename):
 @app.route('/api/contacts', methods=['GET'])
 def get_contacts():
     """Get all contacts"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM contacts ORDER BY created_at DESC')
-    rows = cursor.fetchall()
-    conn.close()
+    db = get_db_connection()
+    cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+    
+    # Turso returns rows differently than SQLite
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
+    else:
+        rows = cursor.fetchall()
+    db.close()
     
     contacts = []
     for row in rows:
-        contact = dict(row)
+        contact = dict_from_row(row)
         # Parse images JSON
         if contact.get('images'):
             try:
@@ -331,13 +350,12 @@ def create_contact():
     if not data.get('fullName') and not data.get('company'):
         return jsonify({'error': 'Name or company is required'}), 400
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    db = get_db_connection()
     
-    # Handle images - store as JSON (base64 in SQLite for Vercel)
+    # Handle images - store as JSON (base64 in database for Vercel)
     images_json = json.dumps(data.get('images', []))
     
-    cursor.execute('''
+    cursor = db.execute('''
         INSERT INTO contacts (full_name, company, designation, phone, email, website, industry, images, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
@@ -352,38 +370,48 @@ def create_contact():
         datetime.now().isoformat()
     ))
     
-    contact_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+    # Get the last inserted row id
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        # Turso: use a separate query to get lastrowid
+        result = db.execute('SELECT last_insert_rowid() as id')
+        contact_id = result.rows[0][0] if result.rows else None
+    else:
+        contact_id = cursor.lastrowid
+    
+    db.commit()
+    db.close()
     
     return jsonify({'id': contact_id, 'message': 'Contact created successfully'}), 201
 
 @app.route('/api/contacts/<int:contact_id>', methods=['DELETE'])
 def delete_contact(contact_id):
     """Delete a contact"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    db = get_db_connection()
     
     # Check if contact exists
-    cursor.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
-    if not cursor.fetchone():
-        conn.close()
+    cursor = db.execute('SELECT id FROM contacts WHERE id = ?', (contact_id,))
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
+    else:
+        rows = cursor.fetchall()
+    
+    if not rows:
+        db.close()
         return jsonify({'error': 'Contact not found'}), 404
     
-    cursor.execute('DELETE FROM contacts WHERE id = ?', (contact_id,))
-    conn.commit()
-    conn.close()
+    db.execute('DELETE FROM contacts WHERE id = ?', (contact_id,))
+    db.commit()
+    db.close()
     
     return jsonify({'message': 'Contact deleted successfully'})
 
 @app.route('/api/contacts/clear', methods=['DELETE'])
 def clear_all_contacts():
     """Clear all contacts"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM contacts')
-    conn.commit()
-    conn.close()
+    db = get_db_connection()
+    db.execute('DELETE FROM contacts')
+    db.commit()
+    db.close()
     
     return jsonify({'message': 'All contacts cleared'})
 
@@ -391,13 +419,16 @@ def clear_all_contacts():
 @app.route('/api/industries', methods=['GET'])
 def get_industries():
     """Get all industries"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
-    rows = cursor.fetchall()
-    conn.close()
+    db = get_db_connection()
+    cursor = db.execute('SELECT * FROM industries ORDER BY is_default DESC, name ASC')
     
-    industries = [dict(row) for row in rows]
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
+    else:
+        rows = cursor.fetchall()
+    db.close()
+    
+    industries = [dict_from_row(row) for row in rows]
     return jsonify(industries)
 
 @app.route('/api/industries', methods=['POST'])
@@ -410,21 +441,23 @@ def create_industry():
     
     industry_id = data.get('id', data['name'].lower().replace(' ', '-') + '_' + str(int(time.time())))
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    db = get_db_connection()
     
     try:
-        cursor.execute(
+        db.execute(
             'INSERT INTO industries (id, name, is_default) VALUES (?, ?, 0)',
             (industry_id, data['name'])
         )
-        conn.commit()
-        conn.close()
+        db.commit()
+        db.close()
         
         return jsonify({'id': industry_id, 'message': 'Industry created successfully'}), 201
-    except sqlite3.IntegrityError:
-        conn.close()
-        return jsonify({'error': 'Industry already exists'}), 400
+    except Exception as e:
+        db.close()
+        error_msg = str(e)
+        if 'UNIQUE constraint' in error_msg or 'duplicate key' in error_msg.lower():
+            return jsonify({'error': 'Industry already exists'}), 400
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/api/industries/<industry_id>', methods=['PUT'])
 def update_industry(industry_id):
@@ -434,41 +467,51 @@ def update_industry(industry_id):
     if not data or not data.get('name'):
         return jsonify({'error': 'Industry name is required'}), 400
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    db = get_db_connection()
     
-    cursor.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
+    cursor = db.execute('UPDATE industries SET name = ? WHERE id = ?', (data['name'], industry_id))
     
-    if cursor.rowcount == 0:
-        conn.close()
+    # Check rows affected - Turso vs SQLite
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        rows_affected = cursor.rows_affected if hasattr(cursor, 'rows_affected') else 0
+    else:
+        rows_affected = cursor.rowcount
+    
+    if rows_affected == 0:
+        db.close()
         return jsonify({'error': 'Industry not found'}), 404
     
-    conn.commit()
-    conn.close()
+    db.commit()
+    db.close()
     
     return jsonify({'message': 'Industry updated successfully'})
 
 @app.route('/api/industries/<industry_id>', methods=['DELETE'])
 def delete_industry(industry_id):
     """Delete an industry"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    db = get_db_connection()
     
     # Check if it's a default industry
-    cursor.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
-    row = cursor.fetchone()
+    cursor = db.execute('SELECT is_default FROM industries WHERE id = ?', (industry_id,))
     
-    if not row:
-        conn.close()
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
+    else:
+        rows = cursor.fetchall()
+    
+    if not rows:
+        db.close()
         return jsonify({'error': 'Industry not found'}), 404
     
-    if row['is_default']:
-        conn.close()
+    is_default = dict_from_row(rows[0]).get('is_default', 0) if rows else 0
+    
+    if is_default:
+        db.close()
         return jsonify({'error': 'Cannot delete default industry'}), 400
     
-    cursor.execute('DELETE FROM industries WHERE id = ?', (industry_id,))
-    conn.commit()
-    conn.close()
+    db.execute('DELETE FROM industries WHERE id = ?', (industry_id,))
+    db.commit()
+    db.close()
     
     return jsonify({'message': 'Industry deleted successfully'})
 
@@ -548,11 +591,14 @@ def export_excel():
     import csv
     import io
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM contacts ORDER BY created_at DESC')
-    rows = cursor.fetchall()
-    conn.close()
+    db = get_db_connection()
+    cursor = db.execute('SELECT * FROM contacts ORDER BY created_at DESC')
+    
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        rows = cursor.fetchall() if hasattr(cursor, 'fetchall') else cursor.rows
+    else:
+        rows = cursor.fetchall()
+    db.close()
     
     # Create CSV in memory
     output = io.StringIO()
@@ -563,15 +609,16 @@ def export_excel():
     
     # Data
     for row in rows:
+        row_dict = dict_from_row(row)
         writer.writerow([
-            row['full_name'],
-            row['company'],
-            row['designation'],
-            row['phone'],
-            row['email'],
-            row['website'],
-            row['industry'],
-            row['created_at']
+            row_dict.get('full_name', ''),
+            row_dict.get('company', ''),
+            row_dict.get('designation', ''),
+            row_dict.get('phone', ''),
+            row_dict.get('email', ''),
+            row_dict.get('website', ''),
+            row_dict.get('industry', ''),
+            row_dict.get('created_at', '')
         ])
     
     output.seek(0)
@@ -587,9 +634,11 @@ def export_excel():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    db_type = "Turso" if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else "SQLite"
     return jsonify({
         'status': 'ok',
-        'database': os.path.exists(DATABASE_PATH),
+        'database_type': db_type,
+        'database_path': TURSO_DB_URL if (TURSO_DB_URL and TURSO_AUTH_TOKEN) else DATABASE_PATH,
         'vercel_mode': True
     })
 
