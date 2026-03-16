@@ -397,13 +397,8 @@ def create_contact():
         datetime.now().isoformat()
     ))
     
-    # Get the last inserted row id
-    if TURSO_AVAILABLE:
-        # Turso: use a separate query to get lastrowid
-        result = db.execute('SELECT last_insert_rowid() as id')
-        contact_id = result.rows[0][0] if result.rows else None
-    else:
-        contact_id = cursor.lastrowid
+    # Get the last inserted row id - libsql (Turso) supports lastrowid just like SQLite
+    contact_id = cursor.lastrowid
     
     db.commit()
     db.close()
