@@ -32,21 +32,32 @@ TURSO_AUTH_TOKEN = os.environ.get('TURSO_AUTH_TOKEN')
 
 # Track if Turso is available (updated after connection test)
 TURSO_AVAILABLE = False
+_turso_conn = None  # Reuse Turso connection across requests
+
+class _NoCloseConnection:
+    """Wrapper that ignores close() calls to reuse a single Turso connection."""
+    def __init__(self, conn):
+        self._conn = conn
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+    def close(self):
+        pass  # Don't close — reuse across requests
 
 def get_db():
-    """Get database connection - Turso for production, SQLite for local dev"""
+    """Get database connection - Turso for production, SQLite for local dev.
+    Reuses a single connection to avoid per-request connection overhead.
+    Returns a wrapped connection where close() is a no-op (safe to call everywhere)."""
+    global _turso_conn
     if TURSO_DB_URL and TURSO_AUTH_TOKEN and TURSO_AVAILABLE:
         try:
-            # Use Turso (production on Vercel)
-            conn = libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
-            # Test the connection
-            conn.execute('SELECT 1')
-            return conn
+            if _turso_conn is None:
+                _turso_conn = libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+            return _NoCloseConnection(_turso_conn)
         except Exception as e:
-            print(f"Turso connection failed: {e}")
-            print("Falling back to SQLite")
+            print(f"Turso connection failed: {e}, resetting connection")
+            _turso_conn = None
     
-    # Use local SQLite (development or fallback)
+    # Use local SQLite (development or fallback) — close() works normally here
     return sqlite3.connect(DATABASE_PATH)
 
 # OpenAI Configuration
@@ -73,7 +84,7 @@ def init_database():
         try:
             test_conn = libsql.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
             test_conn.execute('SELECT 1')
-            test_conn.close()
+            del test_conn  # Don't call close() — let it drop
             TURSO_AVAILABLE = True
             print("Turso connection verified successfully")
         except Exception as e:
@@ -125,6 +136,12 @@ def init_database():
     
     for industry in default_industries:
         db.execute('INSERT OR IGNORE INTO industries (id, name, is_default) VALUES (?, ?, ?)', industry)
+    
+    # Add index on created_at for fast ordering
+    try:
+        db.execute('CREATE INDEX IF NOT EXISTS idx_contacts_created ON contacts(created_at)')
+    except:
+        pass
     
     db.commit()
     db.close()
